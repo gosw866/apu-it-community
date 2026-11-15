@@ -40,7 +40,9 @@ function shrink(file, max, q, cb) {
 function authErr(e) {
   var m = { "auth/email-already-in-use": "এই ইমেইল দিয়ে আগেই অ্যাকাউন্ট খোলা হয়েছে", "auth/invalid-credential": "ইমেইল বা পাসওয়ার্ড ভুল",
     "auth/wrong-password": "পাসওয়ার্ড ভুল", "auth/user-not-found": "এই ইমেইলে কোনো অ্যাকাউন্ট নেই", "auth/weak-password": "পাসওয়ার্ড কমপক্ষে ৬ অক্ষরের দিন",
-    "auth/invalid-email": "ইমেইলটি সঠিক নয়", "auth/too-many-requests": "অনেকবার চেষ্টা হয়েছে, কিছুক্ষণ পরে আবার চেষ্টা করুন" };
+    "auth/invalid-email": "ইমেইলটি সঠিক নয়", "auth/too-many-requests": "অনেকবার চেষ্টা হয়েছে, কিছুক্ষণ পরে আবার চেষ্টা করুন",
+    "auth/network-request-failed": "ইন্টারনেট সংযোগ দেখুন", "auth/unauthorized-domain": "এই ওয়েবসাইটের ঠিকানা Firebase-এর Authorized domains-এ যোগ করা হয়নি",
+    "permission-denied": "অনুমতি নেই — Firestore Rules ঠিকমতো Publish করা হয়েছে কিনা দেখুন" };
   return m[e.code] || e.message || "কিছু একটা সমস্যা হয়েছে";
 }
 
@@ -96,14 +98,28 @@ function Fire() {
       var un2 = function () {};
       var un1 = auth.onAuthStateChanged(function (u) {
         un2(); if (!u) return cb(null);
-        un2 = db.collection("users").doc(u.uid).onSnapshot(function (d) { cb(d.exists ? Object.assign({ id: u.uid }, d.data()) : null); });
+        un2 = db.collection("users").doc(u.uid).onSnapshot(function (d) { cb(d.exists ? Object.assign({ id: u.uid }, d.data()) : null); },
+          function (e) { toast(authErr(e)); cb(null); });
       });
       return function () { un1(); un2(); };
     },
+    /* ★ প্রথম যে নিবন্ধন করবে সে অ্যাডমিন (অনুমোদিত) হবে; বাকিরা "অপেক্ষায়" থাকবে।
+         "meta/admin" ডকুমেন্টটি একবার তৈরি হয়ে গেলে Rules আর কাউকে অ্যাডমিন হতে দেয় না। */
     register: function (d) {
+      var made = null;
       return auth.createUserWithEmailAndPassword(d.email, d.pass).then(function (c) {
-        return db.collection("users").doc(c.user.uid).set({ name: d.name, email: d.email, course: d.course, batch: d.batch, status: "pending", role: "student", t: Date.now() });
-      });
+        made = c.user;
+        var uref = db.collection("users").doc(c.user.uid), mref = db.collection("meta").doc("admin");
+        var base = { name: d.name, email: d.email, course: d.course, batch: d.batch, t: Date.now() };
+        function asStudent() { return uref.set(Object.assign({}, base, { status: "pending", role: "student" })); }
+        return mref.get().then(function (m) {
+          if (m.exists) return asStudent();
+          var b = db.batch();
+          b.set(uref, Object.assign({}, base, { status: "approved", role: "admin" }));
+          b.set(mref, { uid: c.user.uid, t: Date.now() });
+          return b.commit().catch(asStudent);   /* অন্য কেউ আগে অ্যাডমিন হয়ে গেলে সাধারণ সদস্য হিসেবে নিবন্ধন হবে */
+        });
+      }).catch(function (e) { if (made) made.delete().catch(function () {}); throw e; });   /* ব্যর্থ হলে আধা-তৈরি অ্যাকাউন্ট মুছে ফেলা হয় */
     },
     login: function (e, p) { return auth.signInWithEmailAndPassword(e, p); },
     logout: function () { return auth.signOut(); },

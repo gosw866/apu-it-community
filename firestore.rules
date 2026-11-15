@@ -1,0 +1,82 @@
+rules_version = '2';
+/* =====================================================================
+   firestore.rules — APU কমিউনিটির নিরাপত্তা নিয়ম
+   Firebase Console → Firestore Database → Rules ট্যাবে সব কপি-পেস্ট করে Publish চাপুন।
+   এটা ছাড়া যে কেউ ডেটা পড়তে/বদলাতে পারবে, তাই এই ধাপ বাদ দেবেন না।
+   ===================================================================== */
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function userPath(id) { return /databases/$(database)/documents/users/$(id); }
+    function hasProfile() { return signedIn() && exists(userPath(request.auth.uid)); }
+    function me() { return get(userPath(request.auth.uid)).data; }
+    function isMember() { return hasProfile() && me().status == 'approved'; }
+    function isAdmin() { return isMember() && me().role == 'admin'; }
+
+    /* কে প্রথম অ্যাডমিন হয়েছে তার চিহ্ন — একবার তৈরি হলে আর বদলানো যায় না */
+    match /meta/admin {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && getAfter(userPath(request.auth.uid)).data.role == 'admin';
+      allow update, delete: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if isMember() || (signedIn() && request.auth.uid == uid);
+
+      /* নিজের প্রোফাইল তৈরি: সাধারণ সদস্য (অপেক্ষায়), অথবা — কেবল অ্যাডমিন এখনো না থাকলে — প্রথম অ্যাডমিন */
+      allow create: if signedIn() && request.auth.uid == uid && (
+        (request.resource.data.role == 'student' && request.resource.data.status == 'pending')
+        || (request.resource.data.role == 'admin' && request.resource.data.status == 'approved'
+            && !exists(/databases/$(database)/documents/meta/admin)
+            && getAfter(/databases/$(database)/documents/meta/admin).data.uid == request.auth.uid)
+      );
+
+      /* নিজে শুধু ছবি বদলাতে পারবে; অ্যাডমিন অন্যদের শুধু status বদলাতে পারবে */
+      allow update: if (signedIn() && request.auth.uid == uid
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pic'])
+                        && request.resource.data.pic.size() < 100000)
+                    || (isAdmin() && request.auth.uid != uid
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+                        && request.resource.data.status in ['approved', 'rejected', 'pending']);
+      allow delete: if false;
+    }
+
+    match /posts/{id} {
+      allow read: if isMember();
+
+      allow create: if isMember()
+        && request.resource.data.keys().hasOnly(['ch', 'uid', 'name', 'course', 'role', 'pic', 'text', 'img', 'likes', 't'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.name == me().name
+        && request.resource.data.role == me().role
+        && (request.resource.data.ch != 'notice' || isAdmin())
+        && request.resource.data.text.size() <= 5000
+        && request.resource.data.img.size() <= 800000
+        && request.resource.data.likes.size() == 0;
+
+      /* পছন্দ (like): কেউ শুধু নিজের নামটাই যোগ/বাদ দিতে পারবে */
+      allow update: if isMember()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes'])
+        && request.resource.data.likes.toSet().difference(resource.data.likes.toSet()).hasOnly([request.auth.uid])
+        && resource.data.likes.toSet().difference(request.resource.data.likes.toSet()).hasOnly([request.auth.uid]);
+
+      allow delete: if isMember() && (resource.data.uid == request.auth.uid || isAdmin());
+    }
+
+    match /comments/{id} {
+      allow read: if isMember();
+
+      allow create: if isMember()
+        && request.resource.data.keys().hasOnly(['pid', 'uid', 'name', 'pic', 'text', 't'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.name == me().name
+        && request.resource.data.text.size() <= 1000;
+
+      allow update: if false;
+      allow delete: if isMember() && (resource.data.uid == request.auth.uid || isAdmin());
+    }
+  }
+}
